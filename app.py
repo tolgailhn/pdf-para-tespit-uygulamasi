@@ -27,22 +27,18 @@ def extract_text_from_pdf(file):
 
 def normalize_number_str(s: str) -> str:
     """
-    '2,572.13' -> '2572.13'
-    '2.572,13' -> '2572.13'
-    '490.77'   -> '490.77'
-    '490,77'   -> '490.77'
+    2,572.13 -> 2572.13
+    2.572,13 -> 2572.13
+    490.77   -> 490.77
+    490,77   -> 490.77
     """
     s = s.strip()
-    # önce boşluk ve para birimi yazılarını ayıkla
     s = re.sub(r"[^\d,.\-]", "", s)
     if s.count(",") == 1 and s.count(".") >= 1:
-        # binlik . ve ondalık , varsay → noktaları sil, virgülü noktaya çevir
         s = s.replace(".", "")
         s = s.replace(",", ".")
     elif s.count(",") == 1 and s.count(".") == 0:
-        # sadece virgül varsa → ondalık ayırıcıdır
         s = s.replace(",", ".")
-    # şimdi sadece rakam . - kalsın
     s = re.sub(r"[^0-9.\-]", "", s)
     return s
 
@@ -58,71 +54,98 @@ def to_decimal(val) -> Decimal:
             return Decimal("0")
 
 def find_currency_amounts(text):
-    """
-    Genel tarama: 'EUR 490.77' gibi tüm eşleşmeleri yakalar.
-    """
-    results = []
-    for currency in CURRENCIES:
-        pattern = rf"{currency}\s?([0-9\.,]+)"
-        for m in re.findall(pattern, text):
+    "Genel tarama: tüm 'CUR 123,45/123.45' eşleşmelerini yakalar."
+    out = []
+    for cur in CURRENCIES:
+        for m in re.findall(rf"{cur}\s+([0-9\.,]+)", text):
             num = normalize_number_str(m)
             try:
-                amount = float(num)
-                results.append((currency, amount))
+                out.append((cur, float(num)))
             except:
-                continue
-    return results
+                pass
+    return out
 
 def extract_totals_only(text):
     """
-    Sadece 'Total / Totale / Totaal' satırlarını hedefler ve (para birimi, tutar) döndürür.
-    Diller: EN (Total), IT (Totale), NL (Totaal), FR (Total), ES (Total).
+    Sadece 'toplam' satırlarını hedefler. Diller/anahtarlar:
+    - EN/FR/ES/NL/IT: Total, Totale, Totaal
+    - DE: Bruttobetrag, Nettobetrag, Gesamtbetrag, Summe
+    Çıktı: [(CUR, amount, label_priority)]
+    label_priority: Brutto=1, Netto=2, Diğer=9 (küçük daha öncelikli)
     """
     totals = []
-    # başlık varyasyonları
-    total_words = r"(Total|TOTAL|Totale|TOTALE|Totaal|TOTAL|Total[e]?)"
-    pattern = rf"{total_words}\s+(EUR|GBP|PLN|SEK)\s+([0-9\.,]+)"
-    for word, cur, amt in re.findall(pattern, text):
+
+    # 1) “LABEL CUR AMT” (örn: Bruttobetrag EUR 6.30)
+    label_re = r"(Total|Totale|Totaal|Summe|Gesamtbetrag|Bruttobetrag|Nettobetrag)"
+    patt1 = rf"{label_re}.*?\b(EUR|GBP|PLN|SEK)\s+([0-9\.,]+)"
+    for lbl, cur, amt in re.findall(patt1, text, flags=re.IGNORECASE|re.DOTALL):
         num = normalize_number_str(amt)
         try:
-            amount = float(num)
-            totals.append((cur, amount))
+            val = float(num)
+            lbl_low = lbl.lower()
+            pr = 9
+            if "brutto" in lbl_low: pr = 1
+            elif "netto" in lbl_low: pr = 2
+            totals.append((cur, val, pr))
         except:
-            continue
+            pass
 
-    # Bazı belgelerde para birimi sağda olabilir: "EUR 490.77" aynı satırda Total ile
-    # yedek desen: 'Totale ... EUR 490.77'
-    pattern2 = rf"{total_words}.*?(EUR|GBP|PLN|SEK)\s+([0-9\.,]+)"
-    for word, cur, amt in re.findall(pattern2, text, flags=re.IGNORECASE):
+    # 2) “CUR AMT ... LABEL” (yedek) (örn: EUR 6.30 ... Bruttobetrag)
+    patt2 = rf"\b(EUR|GBP|PLN|SEK)\s+([0-9\.,]+).*?{label_re}"
+    for cur, amt, lbl in re.findall(patt2, text, flags=re.IGNORECASE|re.DOTALL):
         num = normalize_number_str(amt)
         try:
-            amount = float(num)
-            totals.append((cur, amount))
+            val = float(num)
+            lbl_low = lbl.lower()
+            pr = 9
+            if "brutto" in lbl_low: pr = 1
+            elif "netto" in lbl_low: pr = 2
+            totals.append((cur, val, pr))
         except:
-            continue
+            pass
 
-    # Tekilleştir (aynı satır iki desenle yakalanırsa)
-    return list(set(totals))
+    # 3) Klasik “Total EUR 123.45”
+    patt3 = rf"(?:^|\s)(Total|Totale|Totaal)\s+(EUR|GBP|PLN|SEK)\s+([0-9\.,]+)"
+    for lbl, cur, amt in re.findall(patt3, text, flags=re.IGNORECASE):
+        num = normalize_number_str(amt)
+        try:
+            val = float(num)
+            totals.append((cur, val, 9))
+        except:
+            pass
+
+    # Aynı satır farklı desenle yakalanırsa tekilleştir
+    uniq = {}
+    for cur, val, pr in totals:
+        key = cur
+        # Aynı para birimi için öncelik: Brutto (1) > Netto (2) > diğer (9); eşitse büyük tutarı seç
+        if key not in uniq:
+            uniq[key] = (val, pr)
+        else:
+            old_val, old_pr = uniq[key]
+            if pr < old_pr or (pr == old_pr and val > old_val):
+                uniq[key] = (val, pr)
+
+    # Listeye çevir
+    return [(k, v[0]) for k, v in uniq.items()]
 
 with st.expander("📄 PDF Analizi (EUR/PLN/GBP/SEK tespiti ve EUR'a çeviri)", expanded=True):
-    uploaded_pdfs = st.file_uploader(
-        "PDF dosyalarını yükleyin", type="pdf", accept_multiple_files=True, key="pdfs"
-    )
+    uploaded_pdfs = st.file_uploader("PDF dosyalarını yükleyin", type="pdf", accept_multiple_files=True, key="pdfs")
 
     colA, colB, colC, colD = st.columns([1,1,2,2])
     with colA:
-        convert = st.checkbox("💱 Sadece PLN/GBP/SEK'i EUR'a çevir", value=True, key="pdf_convert")
+        convert = st.checkbox("💱 Sadece PLN/GBP/SEK'i EUR'a çevir", value=True)
     with colB:
-        show_negative = st.checkbox("➖ Negatifleri göster", value=False, key="pdf_neg")
+        show_negative = st.checkbox("➖ Negatifleri göster", value=False)
     with colC:
         dedupe_in_file = st.checkbox("🔁 Aynı (para,tutar) tekrarlarını aynı dosyada tek say", value=True)
     with colD:
-        totals_mode = st.checkbox("📌 Sadece 'Total/Totale/Totaal' satırını kullan (önerilir)", value=True)
+        totals_mode = st.checkbox("📌 Sadece 'Toplam' satırları (Total/Totale/Totaal/Brutto/Netto…)", value=True)
 
     eur_rates = {
-        "PLN": st.number_input("PLN → EUR kuru", min_value=0.0, value=0.22, key="pln_rate"),
-        "GBP": st.number_input("GBP → EUR kuru", min_value=0.0, value=1.17, key="gbp_rate"),
-        "SEK": st.number_input("SEK → EUR kuru", min_value=0.0, value=0.084, key="sek_rate")
+        "PLN": st.number_input("PLN → EUR kuru", min_value=0.0, value=0.22),
+        "GBP": st.number_input("GBP → EUR kuru", min_value=0.0, value=1.17),
+        "SEK": st.number_input("SEK → EUR kuru", min_value=0.0, value=0.084)
     }
 
     pdf_rows = []
@@ -132,33 +155,29 @@ with st.expander("📄 PDF Analizi (EUR/PLN/GBP/SEK tespiti ve EUR'a çeviri)", 
             text = extract_text_from_pdf(file)
 
             if totals_mode:
-                raw_results = extract_totals_only(text)
-                # eğer hiçbir 'Total' bulunamazsa genel taramaya fallback
-                if not raw_results:
-                    raw_results = find_currency_amounts(text)
+                raw = extract_totals_only(text)
+                if not raw:
+                    raw = find_currency_amounts(text)  # fallback
             else:
-                raw_results = find_currency_amounts(text)
+                raw = find_currency_amounts(text)
 
-            # Aynı dosyada aynı (para,tutar) tekrarlarını tekilleştir (isteğe bağlı)
-            iterable = set(raw_results) if dedupe_in_file else raw_results
+            iterable = set(raw) if dedupe_in_file else raw
 
-            # Para birimi bazında toplam
             sums = defaultdict(float)
-            for currency, amount in iterable:
-                if not show_negative and amount < 0:
+            for cur, amt in iterable:
+                if not show_negative and amt < 0:
                     continue
-                sums[currency] += amount
+                sums[cur] += amt
 
-            # Sonuç satırları
-            for currency, total_amount in sums.items():
-                if currency == "EUR":
-                    eur_value = total_amount  # EUR'u çevirmeyiz
+            for cur, total_amount in sums.items():
+                if cur == "EUR":
+                    eur_value = total_amount
                 else:
-                    eur_value = round(total_amount * eur_rates.get(currency, 0), 2) if convert else total_amount
+                    eur_value = round(total_amount * eur_rates.get(cur, 0), 2) if convert else total_amount
 
                 pdf_rows.append({
                     "Dosya": file.name,
-                    "Para Birimi": currency,
+                    "Para Birimi": cur,
                     "Toplam Tutar": round(total_amount, 2),
                     "EUR Karşılığı": round(eur_value, 2)
                 })
@@ -167,21 +186,18 @@ with st.expander("📄 PDF Analizi (EUR/PLN/GBP/SEK tespiti ve EUR'a çeviri)", 
             pdf_df = pd.DataFrame(pdf_rows)
             st.dataframe(pdf_df, use_container_width=True)
 
-            # 🔢 GENEL TOPLAM = "EUR Karşılığı" sütununun Decimal ile güvenli toplamı
-            eur_series = pdf_df["EUR Karşılığı"].apply(lambda x: to_decimal(x))
+            eur_series = pdf_df["EUR Karşılığı"].apply(to_decimal)
             total_eur = sum(eur_series, Decimal("0"))
             st.success(f"💶 PDF'lerden Genel EUR Toplamı: {total_eur.quantize(Decimal('0.01'))} EUR")
 
-            # Excel indir
-            excel_buff = io.BytesIO()
-            pdf_df.to_excel(excel_buff, index=False)
-            st.download_button("📥 PDF Sonuçlarını Excel olarak indir", data=excel_buff.getvalue(), file_name="pdf_rapor.xlsx")
+            xbuf = io.BytesIO()
+            pdf_df.to_excel(xbuf, index=False)
+            st.download_button("📥 PDF Sonuçlarını Excel olarak indir", data=xbuf.getvalue(), file_name="pdf_rapor.xlsx")
 
-            # TXT indir
             txt = pdf_df.to_csv(sep="\t", index=False)
             st.download_button("📄 PDF Sonuçlarını TXT olarak indir", data=txt, file_name="pdf_rapor.txt")
         else:
-            st.info("PDF'lerde geçerli 'Total/Totale/Totaal' veya para birimi bulunamadı.")
+            st.info("PDF'lerde geçerli 'Toplam' satırı veya para birimi bulunamadı.")
 
 # =========================================
 # =========  SATIŞ EXCEL ANALİZİ  =========
@@ -197,9 +213,7 @@ Bir veya birden fazla Excel yükleyebilirsin. Uygulama:
 - (Varsa) **Dispatched Quantity** (p1) sütununu toplayarak adet toplamını ayrıca gösterir.
 """)
 
-sales_files = st.file_uploader(
-    "Satış Excel dosyalarını yükleyin (XLSX/CSV)", type=["xlsx", "csv"], accept_multiple_files=True, key="sales"
-)
+sales_files = st.file_uploader("Satış Excel dosyalarını yükleyin (XLSX/CSV)", type=["xlsx", "csv"], accept_multiple_files=True, key="sales")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -304,7 +318,6 @@ if sales_files:
             txt2 = sales_df.to_csv(sep="\t", index=False)
             st.download_button("📄 Satış Özeti (TXT)", data=txt2, file_name="satis_ozet.txt")
     else:
-        if sales_files:
-            st.warning("Yüklenen Excel/CSV dosyalarında uygun sütunlar bulunamadı veya tüm satırlar boş.")
-        else:
-            st.info("Henüz satış dosyası yüklemediniz.")
+        st.warning("Yüklenen Excel/CSV dosyalarında uygun sütunlar bulunamadı veya tüm satırlar boş.")
+else:
+    st.info("Henüz satış dosyası yüklemediniz.")
