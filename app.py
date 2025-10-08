@@ -13,12 +13,9 @@ def extract_text_from_pdf(file):
     text = ""
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-            text += page.extract_text() or ""
-            if page.images:
-                for img in page.images:
-                    x0, top, x1, bottom = img["x0"], img["top"], img["x1"], img["bottom"]
-                    cropped = page.to_image().crop((x0, top, x1, bottom)).original
-                    text += pytesseract.image_to_string(cropped)
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
     return text
 
 def find_currency_amounts(text):
@@ -78,3 +75,4 @@ if uploaded_files:
         st.download_button("📄 TXT olarak indir", data=txt, file_name="rapor.txt")
     else:
         st.info("Hiç geçerli para birimi bulunamadı.")
+
