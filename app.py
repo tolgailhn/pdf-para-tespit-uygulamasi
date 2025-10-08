@@ -6,16 +6,18 @@ import re
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 
-# ---- Genel Ayar ----
-st.set_page_config(page_title="PDF & Satış Analiz Aracı", layout="wide")
-st.title("💸 PDF Para Birimi Tarayıcı & Satış Excel Analiz")
-
-# =========================================
-# ============  PDF ANALİZİ  ==============
-# =========================================
+# ------------- Genel -------------
+st.set_page_config(page_title="Aylık PDF & Satış Analizi", layout="wide")
+st.title("📅 Aylık PDF & Satış Analizi (Ocak–Aralık)")
 
 CURRENCIES = ["EUR", "PLN", "GBP", "SEK"]
+MONTHS = [
+    ("2025-01", "Ocak"), ("2025-02", "Şubat"), ("2025-03", "Mart"), ("2025-04", "Nisan"),
+    ("2025-05", "Mayıs"), ("2025-06", "Haziran"), ("2025-07", "Temmuz"), ("2025-08", "Ağustos"),
+    ("2025-09", "Eylül"), ("2025-10", "Ekim"), ("2025-11", "Kasım"), ("2025-12", "Aralık")
+]
 
+# ------------- Yardımcılar (PDF) -------------
 def extract_text_from_pdf(file):
     text = ""
     with pdfplumber.open(file) as pdf:
@@ -26,12 +28,6 @@ def extract_text_from_pdf(file):
     return text
 
 def normalize_number_str(s: str) -> str:
-    """
-    2,572.13 -> 2572.13
-    2.572,13 -> 2572.13
-    490.77   -> 490.77
-    490,77   -> 490.77
-    """
     s = s.strip()
     s = re.sub(r"[^\d,.\-]", "", s)
     if s.count(",") == 1 and s.count(".") >= 1:
@@ -54,10 +50,6 @@ def to_decimal(val) -> Decimal:
             return Decimal("0")
 
 def find_currency_amounts(text):
-    """
-    Genel tarama: 'CUR 123,45/123.45' eşleşmelerini yakalar.
-    Fallback olarak kullanılır.
-    """
     out = []
     for cur in CURRENCIES:
         for m in re.findall(rf"{cur}\s+([0-9\.,]+)", text):
@@ -70,9 +62,8 @@ def find_currency_amounts(text):
 
 def extract_totals_only(text):
     """
-    Etiketli 'toplam' satırlarını yakalar:
-    Total/Totale/Totaal, Summe, Gesamtbetrag, Bruttobetrag, Nettobetrag,
-    Endbetrag, (OCR varyant) Nettobertrag.
+    Etiketler: Total/Totale/Totaal, Summe, Gesamtbetrag, Bruttobetrag, Nettobetrag,
+              Endbetrag, (OCR varyant) Nettobertrag
     Çıktı: [{cur, val(float), pos(int), label(str), labeled(bool), raw(str)}]
     """
     candidates = []
@@ -113,11 +104,6 @@ def extract_totals_only(text):
     return candidates
 
 def pick_best_total(cands, method="last"):
-    """
-    Eğer ondalıklı aday varsa (6.30/6,30), tam sayıları (303) tamamen eler.
-    Skor: labeled>unlabeled, ondalık>tam sayı, 2 ondalık>diğer ve pos (last modu).
-    method: "last" | "max" | "min"
-    """
     if not cands:
         return None
 
@@ -125,7 +111,7 @@ def pick_best_total(cands, method="last"):
         s = f"{v}"
         return "." in s
 
-    # Ondalıklı aday varsa tam sayıları ele
+    # ondalıklı varsa tam sayıları ele
     if any(has_decimal(x["val"]) for x in cands):
         cands = [x for x in cands if has_decimal(x["val"])]
         if not cands:
@@ -136,134 +122,20 @@ def pick_best_total(cands, method="last"):
     if method == "min":
         return min(cands, key=lambda x: x["val"])
 
-    # default: 'last' + kalite skoru
     def two_decimals(v):
         s = f"{v:.10f}".rstrip("0").rstrip(".")
         return "." in s and len(s.split(".")[1]) == 2
 
     def score(x):
         return (
-            10 if x["labeled"] else 0,       # etiketli olması
+            10 if x["labeled"] else 0,
             5 if has_decimal(x["val"]) else 0,
             3 if two_decimals(x["val"]) else 0,
-            x["pos"]                          # metinde daha sonra gelen (daha büyük pos) tercih
+            x["pos"]  # daha sonra gelen daha iyi
         )
-
     return sorted(cands, key=score)[-1]
 
-with st.expander("📄 PDF Analizi (EUR/PLN/GBP/SEK tespiti ve EUR'a çeviri)", expanded=True):
-    uploaded_pdfs = st.file_uploader(
-        "PDF dosyalarını yükleyin", type="pdf", accept_multiple_files=True, key="pdfs"
-    )
-
-    colA, colB, colC = st.columns([1,1,2])
-    with colA:
-        convert = st.checkbox("💱 Sadece PLN/GBP/SEK'i EUR'a çevir", value=True)
-    with colB:
-        show_negative = st.checkbox("➖ Negatifleri göster", value=False)
-    with colC:
-        totals_mode = st.checkbox("📌 Sadece 'Toplam' satırları (Total/Totale/Totaal/Brutto/Netto…)", value=True)
-
-    # Toplam seçim yöntemi
-    sel_col1, sel_col2 = st.columns([2,2])
-    with sel_col1:
-        total_pick_method = st.selectbox("Toplam seçim yöntemi", ["Son görünen", "En büyük", "En küçük"], index=0)
-    method_map = {"Son görünen": "last", "En büyük": "max", "En küçük": "min"}
-
-    # Döviz kurları
-    eur_rates = {
-        "PLN": st.number_input("PLN → EUR kuru", min_value=0.0, value=0.22),
-        "GBP": st.number_input("GBP → EUR kuru", min_value=0.0, value=1.17),
-        "SEK": st.number_input("SEK → EUR kuru", min_value=0.0, value=0.084)
-    }
-
-    pdf_rows = []
-
-    if uploaded_pdfs:
-        for file in uploaded_pdfs:
-            text = extract_text_from_pdf(file)
-
-            if totals_mode:
-                candidates = extract_totals_only(text)
-                # Hiç etiketli aday yoksa genel taramaya düş
-                if not candidates:
-                    raw_pairs = find_currency_amounts(text)
-                    # raw_pairs -> dict listesine çevir (etiketsiz)
-                    candidates = [{"cur": c, "val": v, "pos": 0, "label": "", "labeled": False, "raw": f"{c} {v}"} for c, v in raw_pairs]
-            else:
-                raw_pairs = find_currency_amounts(text)
-                candidates = [{"cur": c, "val": v, "pos": 0, "label": "", "labeled": False, "raw": f"{c} {v}"} for c, v in raw_pairs]
-
-            # Para birimi bazında en iyi toplamı seç
-            selected_by_cur = {}
-            for cur in CURRENCIES:
-                cur_cands = [c for c in candidates if c["cur"] == cur]
-                pick = pick_best_total(cur_cands, method=method_map[total_pick_method])
-                if pick:
-                    selected_by_cur[cur] = pick["val"]
-
-            # Sonuç satırları
-            for cur, total_amount in selected_by_cur.items():
-                if not show_negative and total_amount < 0:
-                    continue
-                if cur == "EUR":
-                    eur_value = total_amount  # EUR'u çevirmeyiz
-                else:
-                    eur_value = round(total_amount * eur_rates.get(cur, 0), 2) if convert else total_amount
-
-                pdf_rows.append({
-                    "Dosya": file.name,
-                    "Para Birimi": cur,
-                    "Toplam Tutar": round(total_amount, 2),
-                    "EUR Karşılığı": round(eur_value, 2)
-                })
-
-        if pdf_rows:
-            pdf_df = pd.DataFrame(pdf_rows)
-            st.dataframe(pdf_df, use_container_width=True)
-
-            # Genel toplam (Decimal güvenli toplama)
-            eur_series = pd.to_numeric(pdf_df["EUR Karşılığı"], errors="coerce").fillna(0)
-            total_eur = Decimal("0")
-            for v in eur_series:
-                total_eur += to_decimal(v)
-            st.success(f"💶 PDF'lerden Genel EUR Toplamı: {total_eur.quantize(Decimal('0.01'))} EUR")
-
-            # Excel indir
-            xbuf = io.BytesIO()
-            pdf_df.to_excel(xbuf, index=False)
-            st.download_button("📥 PDF Sonuçlarını Excel olarak indir", data=xbuf.getvalue(), file_name="pdf_rapor.xlsx")
-
-            # TXT indir
-            txt = pdf_df.to_csv(sep="\t", index=False)
-            st.download_button("📄 PDF Sonuçlarını TXT olarak indir", data=txt, file_name="pdf_rapor.txt")
-        else:
-            st.info("PDF'lerde geçerli 'Toplam' satırı veya para birimi bulunamadı.")
-
-# =========================================
-# =========  SATIŞ EXCEL ANALİZİ  =========
-# =========================================
-
-st.markdown("---")
-st.header("📊 Satış Excel Analizi (Aylık)")
-
-st.caption("""
-Bir veya birden fazla Excel yükleyebilirsin. Uygulama:
-- **Item Price** (r1) sütunundaki EUR tutarlarını toplar,
-- Kaç satır toplandıysa onu **satış adedi (satır sayımı)** olarak verir,
-- (Varsa) **Dispatched Quantity** (p1) sütununu toplayarak adet toplamını ayrıca gösterir.
-""")
-
-sales_files = st.file_uploader(
-    "Satış Excel dosyalarını yükleyin (XLSX/CSV)", type=["xlsx", "csv"], accept_multiple_files=True, key="sales"
-)
-
-col1, col2 = st.columns(2)
-with col1:
-    custom_price_col = st.text_input("Item Price sütun adı (otomatik: Item Price)", value="Item Price")
-with col2:
-    custom_qty_col = st.text_input("Dispatched Quantity sütun adı (otomatik: Dispatched Quantity)", value="Dispatched Quantity")
-
+# ------------- Yardımcılar (Satış Excel) -------------
 def coerce_euro_number(x):
     if pd.isna(x):
         return None
@@ -282,86 +154,228 @@ def coerce_euro_number(x):
     except:
         return None
 
-sales_rows = []
-if sales_files:
-    all_frames = []
-    for f in sales_files:
-        if f.name.lower().endswith(".csv"):
-            df = pd.read_csv(f)
+# ------------- Aylık Sekme Bileşeni -------------
+def render_month_tab(month_key: str, label: str):
+    st.subheader(f"🗓️ {label} 2025")
+
+    colA, colB, colC = st.columns([1,1,2])
+    with colA:
+        convert = st.checkbox("💱 Sadece PLN/GBP/SEK'i EUR'a çevir", value=True, key=f"conv_{month_key}")
+    with colB:
+        show_negative = st.checkbox("➖ Negatifleri göster", value=False, key=f"neg_{month_key}")
+    with colC:
+        totals_mode = st.checkbox("📌 Sadece 'Toplam' satırları (Total/Totale/Totaal/Brutto/Netto…)", value=True, key=f"totals_{month_key}")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        eur_rates = {
+            "PLN": st.number_input("PLN → EUR kuru", min_value=0.0, value=0.22, key=f"pln_{month_key}"),
+            "GBP": st.number_input("GBP → EUR kuru", min_value=0.0, value=1.17, key=f"gbp_{month_key}"),
+            "SEK": st.number_input("SEK → EUR kuru", min_value=0.0, value=0.084, key=f"sek_{month_key}")
+        }
+    with c2:
+        pick_method_label = st.selectbox("Toplam seçim yöntemi", ["Son görünen", "En büyük", "En küçük"], index=0, key=f"pick_{month_key}")
+        method_map = {"Son görünen": "last", "En büyük": "max", "En küçük": "min"}
+
+    # --- PDF Yükleme ---
+    with st.expander(f"📄 {label} PDF Yükle (faturalar)", expanded=False):
+        uploaded_pdfs = st.file_uploader("PDF yükle", type="pdf", accept_multiple_files=True, key=f"pdfs_{month_key}")
+
+        pdf_rows = []
+        if uploaded_pdfs:
+            for file in uploaded_pdfs:
+                text = extract_text_from_pdf(file)
+
+                if totals_mode:
+                    candidates = extract_totals_only(text)
+                    if not candidates:
+                        raw_pairs = find_currency_amounts(text)
+                        candidates = [{"cur": c, "val": v, "pos": 0, "label": "", "labeled": False, "raw": f"{c} {v}"} for c, v in raw_pairs]
+                else:
+                    raw_pairs = find_currency_amounts(text)
+                    candidates = [{"cur": c, "val": v, "pos": 0, "label": "", "labeled": False, "raw": f"{c} {v}"} for c, v in raw_pairs]
+
+                selected_by_cur = {}
+                for cur in CURRENCIES:
+                    cur_cands = [c for c in candidates if c["cur"] == cur]
+                    pick = pick_best_total(cur_cands, method=method_map[pick_method_label])
+                    if pick:
+                        selected_by_cur[cur] = pick["val"]
+
+                for cur, total_amount in selected_by_cur.items():
+                    if not show_negative and total_amount < 0:
+                        continue
+                    if cur == "EUR":
+                        eur_value = total_amount
+                    else:
+                        eur_value = round(total_amount * eur_rates.get(cur, 0), 2) if convert else total_amount
+                    pdf_rows.append({
+                        "Ay": label,
+                        "Dosya": file.name,
+                        "Para Birimi": cur,
+                        "Toplam Tutar": round(total_amount, 2),
+                        "EUR Karşılığı": round(eur_value, 2)
+                    })
+
+            if pdf_rows:
+                pdf_df = pd.DataFrame(pdf_rows)
+                st.dataframe(pdf_df, use_container_width=True)
+                total_eur = Decimal("0")
+                for v in pd.to_numeric(pdf_df["EUR Karşılığı"], errors="coerce").fillna(0):
+                    total_eur += to_decimal(v)
+                st.success(f"💶 {label} PDF'lerden EUR Toplamı: {total_eur.quantize(Decimal('0.01'))} EUR")
+
+                xbuf = io.BytesIO()
+                pdf_df.to_excel(xbuf, index=False)
+                st.download_button(f"📥 {label} PDF Sonuçları (Excel)", data=xbuf.getvalue(), file_name=f"{month_key}_pdf_rapor.xlsx")
+            else:
+                st.info(f"{label} için PDF sonucu yok.")
         else:
-            df = pd.read_excel(f)
+            pdf_df = pd.DataFrame()
 
-        lower_map = {c.lower(): c for c in df.columns}
+    # --- Satış Excel Yükleme ---
+    st.markdown("—")
+    st.subheader(f"📊 {label} Satış Excel Analizi")
 
-        price_col_guess = None
-        for key in [custom_price_col, "Item Price", "item price", "price", "itemprice", "r1"]:
-            if key.lower() in lower_map:
-                price_col_guess = lower_map[key.lower()]
-                break
+    colp1, colp2 = st.columns(2)
+    with colp1:
+        price_col = st.text_input("Item Price sütun adı", value="Item Price", key=f"price_{month_key}")
+    with colp2:
+        qty_col = st.text_input("Dispatched Quantity sütun adı (opsiyonel)", value="Dispatched Quantity", key=f"qty_{month_key}")
 
-        qty_col_guess = None
-        for key in [custom_qty_col, "Dispatched Quantity", "dispatched quantity", "quantity", "qty", "p1"]:
-            if key.lower() in lower_map:
-                qty_col_guess = lower_map[key.lower()]
-                break
+    with st.expander(f"📈 {label} Satış Excel/CSV Yükle", expanded=False):
+        sales_files = st.file_uploader("Excel/CSV yükle", type=["xlsx","csv"], accept_multiple_files=True, key=f"sales_{month_key}")
 
-        if not price_col_guess:
-            st.warning(f"⚠️ {f.name} içinde '{custom_price_col}' / 'Item Price' sütunu bulunamadı.")
-            continue
-
-        df["_price_num"] = df[price_col_guess].apply(coerce_ero_number) if False else df[price_col_guess].apply(coerce_euro_number)
-        price_sum = df["_price_num"].dropna().sum()
-        sales_count_rows = int(df["_price_num"].dropna().shape[0])
-
-        qty_sum = None
-        if qty_col_guess:
-            df["_qty_num"] = pd.to_numeric(df[qty_col_guess], errors="coerce")
-            qty_sum = int(df["_qty_num"].dropna().sum())
-
-        sales_rows.append({
-            "Dosya": f.name,
-            "Toplam EUR (Item Price)": round(float(price_sum), 2) if pd.notna(price_sum) else 0.0,
-            "Satış Adedi (Satır sayımı)": sales_count_rows,
-            "Satış Adedi (Dispatched Quantity toplamı)": qty_sum if qty_sum is not None else "-"
-        })
-
-        keep_cols = [price_col_guess]
-        if qty_col_guess:
-            keep_cols.append(qty_col_guess)
-        df_keep = df[keep_cols].copy()
-        df_keep.insert(0, "Kaynak Dosya", f.name)
-        all_frames.append(df_keep)
-
-    if sales_rows:
-        sales_df = pd.DataFrame(sales_rows)
-        st.subheader("📦 Dosya Bazlı Satış Özeti")
-        st.dataframe(sales_df, use_container_width=True)
-
-        total_sales_eur = float(pd.to_numeric(sales_df["Toplam EUR (Item Price)"], errors="coerce").fillna(0).sum())
-        total_sales_count_rows = int(pd.to_numeric(sales_df["Satış Adedi (Satır sayımı)"], errors="coerce").fillna(0).sum())
-        dq_col = pd.to_numeric(sales_df.get("Satış Adedi (Dispatched Quantity toplamı)"), errors="coerce").fillna(0)
-        total_dq = int(dq_col.sum())
-
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.success(f"💶 Genel Toplam Satış (EUR): **{round(total_sales_eur, 2)}**")
-        with c2:
-            st.info(f"🧾 Satış Adedi (satır sayımı): **{total_sales_count_rows}**")
-        with c3:
-            st.info(f"📦 Satış Adedi (Dispatched Quantity): **{total_dq}**")
-
-        if all_frames:
-            merged = pd.concat(all_frames, ignore_index=True)
-            out = io.BytesIO()
-            with pd.ExcelWriter(out, engine="openpyxl") as writer:
-                sales_df.to_excel(writer, index=False, sheet_name="Ozet")
-                merged.to_excel(writer, index=False, sheet_name="Detay")
-            st.download_button("📥 Satış Özeti + Detayı (Excel)", data=out.getvalue(), file_name="satis_ozet_detay.xlsx")
-
-            txt2 = sales_df.to_csv(sep="\t", index=False)
-            st.download_button("📄 Satış Özeti (TXT)", data=txt2, file_name="satis_ozet.txt")
-    else:
+        sales_rows = []
+        merged_frames = []
         if sales_files:
-            st.warning("Yüklenen Excel/CSV dosyalarında uygun sütunlar bulunamadı veya tüm satırlar boş.")
+            for f in sales_files:
+                if f.name.lower().endswith(".csv"):
+                    df = pd.read_csv(f)
+                else:
+                    df = pd.read_excel(f)
+
+                lower_map = {c.lower(): c for c in df.columns}
+
+                price_col_guess = None
+                for key in [price_col, "Item Price", "item price", "price", "itemprice", "r1"]:
+                    if key.lower() in lower_map:
+                        price_col_guess = lower_map[key.lower()]
+                        break
+
+                qty_col_guess = None
+                for key in [qty_col, "Dispatched Quantity", "dispatched quantity", "quantity", "qty", "p1"]:
+                    if key.lower() in lower_map:
+                        qty_col_guess = lower_map[key.lower()]
+                        break
+
+                if not price_col_guess:
+                    st.warning(f"⚠️ {f.name} içinde '{price_col}' / 'Item Price' bulunamadı.")
+                    continue
+
+                df["_price_num"] = df[price_col_guess].apply(coerce_euro_number)
+                price_sum = df["_price_num"].dropna().sum()
+                sales_count_rows = int(df["_price_num"].dropna().shape[0])
+
+                qty_sum = None
+                if qty_col_guess:
+                    df["_qty_num"] = pd.to_numeric(df[qty_col_guess], errors="coerce")
+                    qty_sum = int(df["_qty_num"].dropna().sum())
+
+                sales_rows.append({
+                    "Ay": label,
+                    "Dosya": f.name,
+                    "Toplam EUR (Item Price)": round(float(price_sum), 2) if pd.notna(price_sum) else 0.0,
+                    "Satış Adedi (Satır sayımı)": sales_count_rows,
+                    "Satış Adedi (Dispatched Quantity toplamı)": qty_sum if qty_sum is not None else "-"
+                })
+
+                keep_cols = [price_col_guess]
+                if qty_col_guess:
+                    keep_cols.append(qty_col_guess)
+                df_keep = df[keep_cols].copy()
+                df_keep.insert(0, "Kaynak Dosya", f.name)
+                df_keep.insert(0, "Ay", label)
+                merged_frames.append(df_keep)
+
+            if sales_rows:
+                sales_df = pd.DataFrame(sales_rows)
+                st.dataframe(sales_df, use_container_width=True)
+
+                tot_sales_eur = float(pd.to_numeric(sales_df["Toplam EUR (Item Price)"], errors="coerce").fillna(0).sum())
+                tot_row_cnt = int(pd.to_numeric(sales_df["Satış Adedi (Satır sayımı)"], errors="coerce").fillna(0).sum())
+                dq_col_series = pd.to_numeric(sales_df["Satış Adedi (Dispatched Quantity toplamı)"].replace("-", 0), errors="coerce").fillna(0)
+                tot_dq = int(dq_col_series.sum())
+
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    st.success(f"💶 {label} Satış Toplamı (EUR): **{round(tot_sales_eur, 2)}**")
+                with c2:
+                    st.info(f"🧾 {label} Satış Adedi (satır): **{tot_row_cnt}**")
+                with c3:
+                    st.info(f"📦 {label} Satış Adedi (Dispatched Qty): **{tot_dq}**")
+
+                out = io.BytesIO()
+                with pd.ExcelWriter(out, engine="openpyxl") as writer:
+                    sales_df.to_excel(writer, index=False, sheet_name=f"{label}_Ozet")
+                    if merged_frames:
+                        pd.concat(merged_frames, ignore_index=True).to_excel(writer, index=False, sheet_name=f"{label}_Detay")
+                st.download_button(f"📥 {label} Satış Özeti (Excel)", data=out.getvalue(), file_name=f"{month_key}_satis_ozet.xlsx")
+            else:
+                st.info(f"{label} için satış özeti yok.")
         else:
-            st.info("Henüz satış dosyası yüklemediniz.")
+            sales_df = pd.DataFrame()
+
+    return pdf_df, sales_df
+
+# ------------- Sekmeler ve Yıllık Özet -------------
+tabs = st.tabs([m[1] for m in MONTHS])
+
+all_pdf_dfs = []
+all_sales_dfs = []
+
+for tab, (mkey, mlabel) in zip(tabs, MONTHS):
+    with tab:
+        pdf_df, sales_df = render_month_tab(mkey, mlabel)
+        if not pdf_df.empty:
+            all_pdf_dfs.append(pdf_df.assign(Ay=mlabel))
+        if not sales_df.empty:
+            all_sales_dfs.append(sales_df.assign(Ay=mlabel))
+
+st.markdown("---")
+st.header("📚 Yıllık Özet (Tüm Aylar)")
+
+colA, colB = st.columns(2)
+with colA:
+    if all_pdf_dfs:
+        pdf_all = pd.concat(all_pdf_dfs, ignore_index=True)
+        st.subheader("📄 PDF Birleşik")
+        st.dataframe(pdf_all, use_container_width=True)
+        total_eur = Decimal("0")
+        for v in pd.to_numeric(pdf_all["EUR Karşılığı"], errors="coerce").fillna(0):
+            total_eur += to_decimal(v)
+        st.success(f"💶 Yıl Boyu PDF EUR Toplamı: {total_eur.quantize(Decimal('0.01'))} EUR")
+    else:
+        st.info("Henüz PDF verisi yok.")
+
+with colB:
+    if all_sales_dfs:
+        sales_all = pd.concat(all_sales_dfs, ignore_index=True)
+        st.subheader("📈 Satış Birleşik")
+        st.dataframe(sales_all, use_container_width=True)
+        ge_tot_eur = float(pd.to_numeric(sales_all["Toplam EUR (Item Price)"], errors="coerce").fillna(0).sum())
+        ge_rows = int(pd.to_numeric(sales_all["Satış Adedi (Satır sayımı)"], errors="coerce").fillna(0).sum())
+        ge_dq = int(pd.to_numeric(sales_all["Satış Adedi (Dispatched Quantity toplamı)"].replace("-", 0), errors="coerce").fillna(0).sum())
+        st.success(f"💶 Yıl Boyu Satış Toplamı (EUR): {round(ge_tot_eur, 2)} | 🧾 Satış Adedi: {ge_rows} | 📦 Dispatched Qty: {ge_dq}")
+    else:
+        st.info("Henüz satış verisi yok.")
+
+# Tek Excel indir: tüm aylar
+if all_pdf_dfs or all_sales_dfs:
+    out_all = io.BytesIO()
+    with pd.ExcelWriter(out_all, engine="openpyxl") as writer:
+        if all_pdf_dfs:
+            pdf_all.to_excel(writer, index=False, sheet_name="PDF_Birlesik")
+        if all_sales_dfs:
+            sales_all.to_excel(writer, index=False, sheet_name="Satis_Birlesik")
+    st.download_button("📥 Yıllık Birleşik Excel (PDF+Satış)", data=out_all.getvalue(), file_name="yillik_birlesik_ozet.xlsx")
