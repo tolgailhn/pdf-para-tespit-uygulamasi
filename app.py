@@ -35,6 +35,15 @@ def normalize_number_str(s: str) -> str:
     s = s.strip()
     # önce boşluk ve para birimi yazılarını ayıkla
     s = re.sub(r"[^\d,.\-]", "", s)
+
+    # Bazı PDF çıktılarında sayıların sonunda fazladan nokta/virgül olabiliyor
+    # (örn. "6,30."), bu durum ondalık kısmın düşmesine sebep oluyordu.
+    # Hem baştaki hem sondaki ayracı temizleyelim.
+    while s and s[-1] in ",.":
+        s = s[:-1]
+    while s and s[0] in ",.":
+        s = s[1:]
+
     if s.count(",") == 1 and s.count(".") >= 1:
         # binlik . ve ondalık , varsay → noktaları sil, virgülü noktaya çevir
         s = s.replace(".", "")
