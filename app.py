@@ -5,10 +5,8 @@ import io
 import re
 from collections import defaultdict
 
-# Desteklenen para birimleri
 CURRENCIES = ["EUR", "PLN", "GBP", "SEK"]
 
-# PDF metni çıkartma
 def extract_text_from_pdf(file):
     text = ""
     with pdfplumber.open(file) as pdf:
@@ -18,7 +16,6 @@ def extract_text_from_pdf(file):
                 text += page_text + "\n"
     return text
 
-# Para birimi ve miktar bulma
 def find_currency_amounts(text):
     results = []
     for currency in CURRENCIES:
@@ -32,7 +29,6 @@ def find_currency_amounts(text):
                 continue
     return results
 
-# Arayüz ayarları
 st.set_page_config(page_title="PDF Para Birimi Tarayıcı", layout="wide")
 st.title("💸 PDF Para Birimi Tarayıcı & Döviz Çevirici")
 
@@ -40,7 +36,7 @@ uploaded_files = st.file_uploader("📤 PDF dosyalarını yükleyin", type="pdf"
 convert = st.checkbox("💱 Yalnızca PLN / GBP / SEK değerlerini EUR'a çevir", value=True)
 show_negative = st.checkbox("➖ Negatif değerleri göster", value=False)
 
-# Döviz kurları kullanıcı girişi
+# Kullanıcının girdiği döviz kurları
 eur_rates = {
     "PLN": st.number_input("PLN → EUR kuru", min_value=0.0, value=0.22),
     "GBP": st.number_input("GBP → EUR kuru", min_value=0.0, value=1.17),
@@ -52,18 +48,20 @@ final_data = []
 if uploaded_files:
     for file in uploaded_files:
         text = extract_text_from_pdf(file)
-        results = find_currency_amounts(text)
+        raw_results = find_currency_amounts(text)
 
-        # Aynı para birimindeki değerleri topla
+        # Aynı para birimi ve miktardaki tekrarları kaldır
+        unique_results = set(raw_results)
+
+        # Para birimi bazında toplamları topla
         sums = defaultdict(float)
-        for currency, amount in results:
+        for currency, amount in unique_results:
             if not show_negative and amount < 0:
                 continue
             sums[currency] += amount
 
-        # Dosya bazlı sonuç ekle
         for currency, total_amount in sums.items():
-            if currency == "EUR":  # EUR değerini asla çevirme
+            if currency == "EUR":
                 eur_value = total_amount
             else:
                 eur_value = round(total_amount * eur_rates.get(currency, 0), 2) if convert else total_amount
@@ -75,15 +73,12 @@ if uploaded_files:
                 "EUR Karşılığı": round(eur_value, 2)
             })
 
-    # Sonuç tablosu
+    # Veri varsa tabloyu ve çıktıyı göster
     if final_data:
         df = pd.DataFrame(final_data)
         st.dataframe(df, use_container_width=True)
 
-        # Genel toplam (sadece EUR karşılıkları toplanır)
-        total_eur = sum(
-            row["EUR Karşılığı"] for row in final_data if isinstance(row["EUR Karşılığı"], (int, float))
-        )
+        total_eur = sum(row["EUR Karşılığı"] for row in final_data if isinstance(row["EUR Karşılığı"], (int, float)))
         st.success(f"💶 Genel EUR Toplamı: {round(total_eur, 2)} EUR")
 
         # Excel indir
@@ -94,6 +89,5 @@ if uploaded_files:
         # TXT indir
         txt = df.to_csv(sep="\t", index=False)
         st.download_button("📄 TXT olarak indir", data=txt, file_name="rapor.txt")
-
     else:
         st.warning("⚠️ Geçerli para birimi bulunamadı.")
