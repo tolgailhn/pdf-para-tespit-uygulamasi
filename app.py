@@ -1,14 +1,14 @@
 import streamlit as st
 import pdfplumber
-import pytesseract
-from PIL import Image
 import pandas as pd
 import io
 import re
-import requests
+from collections import defaultdict
 
+# Desteklenen para birimleri
 CURRENCIES = ["EUR", "PLN", "GBP", "SEK"]
 
+# PDF’ten metin çıkartma fonksiyonu
 def extract_text_from_pdf(file):
     text = ""
     with pdfplumber.open(file) as pdf:
@@ -18,61 +18,84 @@ def extract_text_from_pdf(file):
                 text += page_text + "\n"
     return text
 
+# PDF metninden para birimi ve miktar yakalama
 def find_currency_amounts(text):
     results = []
     for currency in CURRENCIES:
-        matches = re.findall(rf"{currency}\s?[\d,]+\.\d+", text)
+        pattern = rf"{currency}\s?[\d,]+\.\d+"
+        matches = re.findall(pattern, text)
         for match in matches:
-            amount = float(match.replace(currency, "").replace(",", "").strip())
-            if amount != 0:
+            try:
+                amount = float(match.replace(currency, "").replace(",", "").strip())
                 results.append((currency, amount))
+            except:
+                continue
     return results
 
-def convert_to_eur(currency, amount):
-    if currency == "EUR":
-        return amount
-    try:
-        url = f"https://api.exchangerate.host/convert?from={currency}&to=EUR&amount={amount}"
-        response = requests.get(url).json()
-        return response['result']
-    except:
-        return None
-
+# Streamlit başlık
+st.set_page_config(page_title="PDF Para Birimi Tarayıcı", layout="wide")
 st.title("💸 PDF Para Birimi Tarayıcı & Döviz Çevirici")
 
-uploaded_files = st.file_uploader("PDF dosyalarını yükleyin", type="pdf", accept_multiple_files=True)
-convert = st.checkbox("Tutarları EUR'a çevir")
-show_negative = st.checkbox("Negatif değerleri göster")
+# Dosya yükleme
+uploaded_files = st.file_uploader("📤 PDF dosyalarını yükleyin", type="pdf", accept_multiple_files=True)
+
+# Ayarlar
+convert = st.checkbox("💱 Tutarları EUR'a çevir", value=True)
+show_negative = st.checkbox("➖ Negatif değerleri göster", value=False)
+
+# Döviz kuru girişleri
+eur_rates = {
+    "PLN": st.number_input("PLN → EUR kuru", min_value=0.0, value=0.22),
+    "GBP": st.number_input("GBP → EUR kuru", min_value=0.0, value=1.17),
+    "SEK": st.number_input("SEK → EUR kuru", min_value=0.0, value=0.084)
+}
+
+# Veri toplama
+final_data = []
 
 if uploaded_files:
-    final_data = []
     for file in uploaded_files:
         text = extract_text_from_pdf(file)
         results = find_currency_amounts(text)
-        file_data = []
+
+        # Aynı para biriminden gelen tutarları toplamak için
+        sums = defaultdict(float)
         for currency, amount in results:
             if not show_negative and amount < 0:
                 continue
-            converted = convert_to_eur(currency, amount) if convert else None
-            file_data.append({
+            sums[currency] += amount
+
+        # Sonuçları tabloya ekle
+        for currency, total_amount in sums.items():
+            if currency == "EUR":
+                eur_value = total_amount
+            else:
+                eur_value = round(total_amount * eur_rates.get(currency, 0), 2)
+
+            final_data.append({
                 "Dosya": file.name,
                 "Para Birimi": currency,
-                "Tutar": amount,
-                "EUR Karşılığı": round(converted, 2) if converted else "-"
+                "Toplam Tutar": round(total_amount, 2),
+                "EUR Karşılığı": round(eur_value, 2)
             })
-        final_data.extend(file_data)
 
+    # Sonuçları göster
     if final_data:
         df = pd.DataFrame(final_data)
         st.dataframe(df)
 
-        # İndirme butonları
+        # Genel EUR toplam
+        total_eur = sum(row["EUR Karşılığı"] for row in final_data if isinstance(row["EUR Karşılığı"], float))
+        st.success(f"💶 Genel EUR Toplamı: {round(total_eur, 2)} EUR")
+
+        # Excel indir
         excel = io.BytesIO()
         df.to_excel(excel, index=False)
         st.download_button("📥 Excel olarak indir", data=excel.getvalue(), file_name="rapor.xlsx")
 
+        # TXT indir
         txt = df.to_csv(sep="\t", index=False)
         st.download_button("📄 TXT olarak indir", data=txt, file_name="rapor.txt")
-    else:
-        st.info("Hiç geçerli para birimi bulunamadı.")
 
+    else:
+        st.warning("Geçerli para birimi bulunamadı.")
